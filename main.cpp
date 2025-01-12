@@ -1,4 +1,4 @@
-#if defined (__APPLE__)
+﻿#if defined (__APPLE__)
 #define GLFW_INCLUDE_GLCOREARB
 #define GL_SILENCE_DEPRECATION
 #else
@@ -19,6 +19,7 @@
 #include "Model3D.hpp"
 #include "SkyBox.hpp"
 #include <iostream>
+
 
 
 const unsigned int SHADOW_WIDTH = 2048;
@@ -46,6 +47,13 @@ GLint normalMatrixLoc;
 GLint lightDirLoc;
 GLint lightColorLoc;
 
+GLint modelFieldLoc;
+GLint viewFieldLoc;
+GLint projectionFieldLoc;
+GLint normalMatrixFieldLoc;
+GLint lightDirFieldLoc;
+GLint lightColorFieldLoc;
+
 // camera
 gps::Camera myCamera(
     glm::vec3(0.0f, 0.0f, 3.0f),
@@ -70,7 +78,9 @@ GLfloat lightAngle;
 
 // shaders
 gps::Shader myBasicShader;
+gps::Shader fieldShader;
 gps::Shader depthShader;
+gps::Shader rainShader;
 
 float pitch = 0.0f;
 float yaw = -90.0f;
@@ -83,6 +93,84 @@ gps::Shader skyboxShader; // Shader pentru skybox
 GLuint depthMapTexture;
 GLuint shadowMapFBO;
 bool showDepthMap;
+bool showRain = false;
+
+GLint rainModelloc, rainViewloc, rainProjectionloc;
+const int numParticles = 1000; // Number of particles
+GLuint rainVAO, rainVBO;
+
+struct RainParticle {
+    glm::vec3 position;
+    float startTime;
+};
+
+std::vector<RainParticle> rainParticles;
+
+void initRain() {
+    for (int i = 0; i < numParticles; ++i) {
+        RainParticle particle;
+        particle.position = glm::vec3(
+            static_cast<float>(rand() % 100 - 80), // x between -10 and 10
+            static_cast<float>(rand() % 100 + 100),     // y between 0 and 20
+            static_cast<float>(rand() % 100 - 10) // z between -10 and 10
+        );
+        particle.startTime = static_cast<float>(rand() % 1000) / 100.0f; // random initial time
+        rainParticles.push_back(particle);
+    }
+
+    glGenVertexArrays(1, &rainVAO);
+    glBindVertexArray(rainVAO);
+
+    glGenBuffers(1, &rainVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, rainVBO);
+    glBufferData(GL_ARRAY_BUFFER, rainParticles.size() * sizeof(RainParticle), rainParticles.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(RainParticle), (GLvoid*)0);
+    glEnableVertexAttribArray(0);
+
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, sizeof(RainParticle), (GLvoid*)(offsetof(RainParticle, startTime)));
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+}
+
+void renderRain() {
+    if (!showRain) return;
+    glUseProgram(rainShader.shaderProgram);
+    glm::mat4 model = glm::mat4(1.0f);
+    glUniformMatrix4fv(rainModelloc, 1, GL_FALSE, glm::value_ptr(model));
+
+    glm::mat4 view = myCamera.getViewMatrix();
+    glUniformMatrix4fv(rainViewloc, 1, GL_FALSE, glm::value_ptr(view));
+
+    
+
+    glm::mat4 projection = glm::perspective(glm::radians(45.0f), 800.0f / 600.0f, 0.1f, 100.0f);
+    glUniformMatrix4fv(rainProjectionloc, 1, GL_FALSE, glm::value_ptr(projection));
+
+    // Update positions of rain particles
+    for (auto& particle : rainParticles) {
+        particle.position.y -= 0.1f; // Move the particle downward (simulating gravity)
+        if (particle.position.y < 0.0f) {
+            // Reset particle to top of screen once it falls off
+            particle.position.y = static_cast<float>(rand() % 30);
+        }
+    }
+
+    // Update the particle buffer with the new positions
+    glBindBuffer(GL_ARRAY_BUFFER, rainVBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, rainParticles.size() * sizeof(RainParticle), rainParticles.data());
+
+    // Set the size of the rain particles
+    glPointSize(5.0f); // Adjust particle size if necessary
+
+    // Render the rain particles
+    glBindVertexArray(rainVAO);
+    glDrawArrays(GL_POINTS, 0, numParticles);
+    glBindVertexArray(0);
+}
+
+
 
 void initSkybox() {
     std::vector<const GLchar*> faces = {
@@ -95,6 +183,8 @@ void initSkybox() {
     };
     mySkyBox.Load(faces);
 }
+
+
 
 
 GLenum glCheckError_(const char* file, int line)
@@ -138,6 +228,9 @@ void windowResizeCallback(GLFWwindow* window, int width, int height) {
     // Send the updated projection matrix to the shader
     myBasicShader.useShaderProgram();
     glUniformMatrix4fv(projectionLoc, 1, GL_FALSE, glm::value_ptr(projection));
+
+    fieldShader.useShaderProgram();
+    glUniformMatrix4fv(projectionFieldLoc, 1, GL_FALSE, glm::value_ptr(projection));
 }
 
 
@@ -150,6 +243,11 @@ void keyboardCallback(GLFWwindow* window, int key, int scancode, int action, int
         if (action == GLFW_PRESS) {
             pressedKeys[key] = true;
         }
+
+        if (key == GLFW_KEY_X && action == GLFW_PRESS) {
+            showRain = !showRain; // Schimbă starea ploii
+        }
+
         else if (action == GLFW_RELEASE) {
             pressedKeys[key] = false;
         }
@@ -198,19 +296,30 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
     glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
     normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
     glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+    fieldShader.useShaderProgram();
+    glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+    glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
 }
 
 
 
 void processMovement() {
-    if (pressedKeys[GLFW_KEY_W]) {
+     normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+     //updateRainParticles(glfwGetTime());
+     if (pressedKeys[GLFW_KEY_W]) {
         myCamera.move(gps::MOVE_FORWARD, cameraSpeed);
         //update view matrix
         view = myCamera.getViewMatrix();
         myBasicShader.useShaderProgram();
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
         // compute normal matrix for teapot
-        normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+       
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+        fieldShader.useShaderProgram();
+        glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+        glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
     }
 
     if (pressedKeys[GLFW_KEY_S]) {
@@ -220,7 +329,12 @@ void processMovement() {
         myBasicShader.useShaderProgram();
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
         // compute normal matrix for teapot
-        normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+        fieldShader.useShaderProgram();
+        glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+        // compute normal matrix for teapot
+        glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
     }
 
     if (pressedKeys[GLFW_KEY_A]) {
@@ -230,7 +344,14 @@ void processMovement() {
         myBasicShader.useShaderProgram();
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
         // compute normal matrix for teapot
-        normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+       
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+        fieldShader.useShaderProgram();
+        glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+        // compute normal matrix for teapot
+
+        glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
     }
 
     if (pressedKeys[GLFW_KEY_D]) {
@@ -240,15 +361,28 @@ void processMovement() {
         myBasicShader.useShaderProgram();
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(view));
         // compute normal matrix for teapot
-        normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        //normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+        fieldShader.useShaderProgram();
+        glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+        // compute normal matrix for teapot
+        //normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
     }
 
     if (pressedKeys[GLFW_KEY_Q]) {
         angle -= 1.0f;
         // update model matrix for teapot
         model = glm::rotate(glm::mat4(1.0f), glm::radians(angle), glm::vec3(0, 1, 0));
-        // update normal matrix for teapot
-        normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix4fv(modelFieldLoc, 1, GL_FALSE, glm::value_ptr(model));
+
+        // Update normal matrix for teapot
+       // normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+        glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+
     }
 
     if (pressedKeys[GLFW_KEY_E]) {
@@ -257,6 +391,9 @@ void processMovement() {
         model = glm::rotate(glm::mat4(1.0f), glm::radians(angle), glm::vec3(0, 1, 0));
         // update normal matrix for teapot
         normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+        glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+
+      
     }
 
     if (pressedKeys[GLFW_KEY_J]) {
@@ -309,6 +446,12 @@ void initShaders() {
         "shaders/basic.frag");
     skyboxShader.loadShader("shaders/skybox.vert", "shaders/skybox.frag");
     skyboxShader.useShaderProgram();
+    fieldShader.loadShader("shaders/field.vert",
+        "shaders/field.frag");
+    rainShader.loadShader("shaders/rain.vert",
+        "shaders/rain.frag");
+    depthShader.loadShader("shaders/shadow.vert",
+        "shaders/shadow.frag");
 
 }
 
@@ -344,6 +487,45 @@ glm::mat4 computeLightSpaceTrMatrix() {
     glm::mat4 lightProjection = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, near_plane, far_plane);
     glm::mat4 lightSpaceTrMatrix = lightProjection * lightView;
     return lightSpaceTrMatrix;
+}
+
+void initField()
+{
+    fieldShader.useShaderProgram();
+    model = glm::rotate(glm::mat4(1.0f), glm::radians(angle), glm::vec3(0.0f, 1.0f, 0.0f));
+    modelFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "model");
+
+    // get view matrix for current camera
+    view = myCamera.getViewMatrix();
+    viewFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "view");
+    // send view matrix to shader
+    glUniformMatrix4fv(viewFieldLoc, 1, GL_FALSE, glm::value_ptr(view));
+
+    // compute normal matrix for teapot
+    normalMatrix = glm::mat3(glm::inverseTranspose(view * model));
+    normalMatrixFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "normalMatrix");
+
+    // create projection matrix
+    projection = glm::perspective(glm::radians(45.0f),
+        (float)myWindow.getWindowDimensions().width / (float)myWindow.getWindowDimensions().height,
+        0.1f, 1000.0f);
+    projectionFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "projection");
+    // send projection matrix to shader
+    glUniformMatrix4fv(projectionFieldLoc, 1, GL_FALSE, glm::value_ptr(projection));
+
+    //set the light direction (direction towards the light)
+    lightDir = glm::vec3(0.0f, 1.0f, 1.0f);
+    //lightRotation = glm::rotate(glm::mat4(1.0f), glm::radians(lightAngle), glm::vec3(0.0f, 1.0f, 0.0f));
+    lightDirFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "lightDir");
+    glUniform3fv(lightDirFieldLoc, 1, glm::value_ptr(lightDir));
+
+
+    //set light color
+    lightColor = glm::vec3(1.0f, 1.0f, 1.0f); //white light
+    lightColorFieldLoc = glGetUniformLocation(fieldShader.shaderProgram, "lightColor");
+    // send light color to shader
+    glUniform3fv(lightColorFieldLoc, 1, glm::value_ptr(lightColor));
+
 }
 
 void initUniforms() {
@@ -385,7 +567,7 @@ void initUniforms() {
     glUniform3fv(lightColorLoc, 1, glm::value_ptr(lightColor));
 }
 
-void renderTeapot(gps::Shader shader) {
+void renderRoad(gps::Shader shader) {
     // select active shader program
     shader.useShaderProgram();
 
@@ -427,13 +609,13 @@ void renderPlant(gps::Shader shader) {
     plant.Draw(shader);
 }
 
-void renderDrum(gps::Shader shader)
+void renderField(gps::Shader shader)
 {
     shader.useShaderProgram();
-    glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(model));
+    glUniformMatrix4fv(modelFieldLoc, 1, GL_FALSE, glm::value_ptr(model));
 
     //send teapot normal matrix data to shader
-    glUniformMatrix3fv(normalMatrixLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
+    glUniformMatrix3fv(normalMatrixFieldLoc, 1, GL_FALSE, glm::value_ptr(normalMatrix));
     field.Draw(shader);
     //road.Draw(shader);
 }
@@ -480,14 +662,15 @@ void renderScene() {
     //render the scene
 
     // render the teapot
-    renderTeapot(myBasicShader);
+    renderRoad(myBasicShader);
     mySkyBox.Draw(skyboxShader, view, projection);
-    renderDrum(myBasicShader);
+    renderField(fieldShader);
     renderCar(myBasicShader);
     renderHouse(myBasicShader);
     renderPlant(myBasicShader);
     renderLamps(myBasicShader);
     renderGard(myBasicShader);
+   
 }
 
 void cleanup() {
@@ -504,20 +687,33 @@ int main(int argc, const char* argv[]) {
         std::cerr << e.what() << std::endl;
         return EXIT_FAILURE;
     }
-
+    
     initOpenGLState();
     initModels();
     initSkybox();
     initShaders();
     initUniforms();
+    initField();
     setWindowCallbacks();
+    
+
+    rainModelloc = glGetUniformLocation(rainShader.shaderProgram, "model");
+    rainViewloc = glGetUniformLocation(rainShader.shaderProgram, "view");
+    rainProjectionloc = glGetUniformLocation(rainShader.shaderProgram, "projection");
+    //glUniform3f(glGetUniformLocation(rainShader.shaderProgram, "rainColor"), 0.7f, 0.85f, 1.0f);
+    //glUniform1f(glGetUniformLocation(rainShader.shaderProgram, "transparency"), 0.5f);
+
+
+    initRain();
 
     glCheckError();
     // application loop
     while (!glfwWindowShouldClose(myWindow.getWindow())) {
         processMovement();
+       // updateRainParticles(glfwGetTime());
         renderScene();
-
+        renderRain();
+        
         glfwPollEvents();
         glfwSwapBuffers(myWindow.getWindow());
 
